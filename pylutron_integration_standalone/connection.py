@@ -18,18 +18,42 @@ class ProtocolError(Exception):
     def __init__(self, message: str) -> None:
         super().__init__(str)
 
+class DisconnectedError(Exception):
+    """Exception raised when we aren't connected."""
+    
+    def __init__(self) -> None:
+        super().__init__('Disconnected')
+
+# If we catch a CancelledError and we don't want to swallow a cancellation,
+# then call we can use this.  (Python does not cleanly distinguish
+# between await raising because it awaited a canceled task and raising
+# because the awaiting task was canceled.)
+def _i_need_to_cancel() -> bool:
+    task = asyncio.current_task()
+    assert task is not None
+    return task.cancelling()
+
 @dataclass
 class _Conn:
     r: asyncio.StreamReader
     w: asyncio.StreamWriter
 
-# TODO: Monitoring messages may be arbitrarily interspersed with actual replies, and
-# there isn't an obvious way to tell which messages are part of a reply vs. which
-# are asynchronously received monitoring messages.
+# Monitoring messages may be arbitrarily interspersed with actual replies, and
+# there is no mechanism in the protocol to tell which messages are part of a reply vs.
+# which are asynchronously received monitoring messages.
 #
 # On the bright side, once we enable prompts, we at least know that all direct
 # replies to queries (critically, ?DETAILS) will be received before the QSE>
-# prompt.
+# prompt.  However, we do not know *which* QSE> prompt they preceed because
+# unsolicited messages end with '\r\nQSE>'.  Thanks, Lutron.
+#
+# We manage to parse the protocol by observing that the incoming stream is a
+# stream of messages where each message either ends with b'\r\nQSE>' or
+# is just b'QSE>' (no newline).  We further observe that no actual logical
+# line of the protocol can start with a Q (everything starts with ~), so
+# we can't get confused by a stray Q at the start of a line.
+#
+# This does not handle the #PASSWD flow.
 
 class LutronConnection:
     """Represents an established Lutron connection."""
@@ -48,14 +72,25 @@ class LutronConnection:
 
     __unsolicited_task: asyncio.Task[bytes] | None # protected by __lock
     __unsolicited_queue: collections.deque[bytes]
+
+    # Only used by __read_one_message(), which is never called
+    # concurrently with itself.
+    __buffered_byte: bytes
+
+    # Nests inside __query_lock and __unsolicited_lock
+    __buffer_lock: asyncio.Lock
+
+    # TODO: We should possibly track when we are in a bad state and quickly fail future operations
     
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.__conn = _Conn(reader, writer)
         self.__unsolicited_lock = asyncio.Lock()
         self.__query_lock = asyncio.Lock()
         self.__lock = asyncio.Lock()
+        self.__buffer_lock = asyncio.Lock()
         self.__unsolicited_task = None
         self.__unsolicited_queue = collections.deque()
+        self.__buffered_byte = b''
 
     @classmethod
     async def create_from_connnection(cls, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 'LutronConnection':
@@ -89,41 +124,95 @@ class LutronConnection:
         self.__prompt_prefix = m[1]
         return self
     
+    async def __read_one_message(self) -> bytes:
+        print('enter __read_one_message')
+        # This needs to be cancelable and then runnable again without losing data
+        assert self.__conn is not None
+        async with self.__buffer_lock:
+            if not self.__buffered_byte:
+                self.__buffered_byte = await self.__conn.r.read(1)
+
+                if not self.__buffered_byte:
+                    # We got EOF.
+                    raise DisconnectedError()
+
+            if self.__buffered_byte == self.__prompt_prefix[0:1]:
+                # We got Q and expect SE>
+                expected = self.__prompt_prefix[1:] + b'>'
+                data = await self.__conn.r.readexactly(len(expected))
+                if data != expected:
+                    raise ProtocolError(f'Expected {expected!r} but received {data!r}')
+                self.__buffered_byte = b''
+                print('__read_one_message: returning blank')
+                return b''
+            else:
+                # We got the first byte of a message and expect the rest of it
+                # followed by b'\r\nQSE>'
+                data = await self.__conn.r.readuntil(b'\r\n' + self.__prompt_prefix + b'>')
+                result = self.__buffered_byte + data[:-(len(self.__prompt_prefix) + 1)] # strip the QSE>
+                self.__buffered_byte = b''
+                print(f'__read_one_message: returning {result!r}')
+                return result
+            
+    def __is_message_a_reply(self, message: bytes) -> bool:
+        # If it's blank (i.e. they send b'QSE>'), then it's a reply.
+        if not message:
+            return True
+        
+        # If it starts with b'~DETAILS,' or b'~ERROR,', then it's a reply
+        upper = message.upper()
+        if upper.startswith(b'~DETAILS') or upper.startswith(b'~ERROR'):
+            return True
+        
+        # Otherwise it's not a reply.  (Note that messages like ~DEVICE
+        # may well be sent as a result of a query, but they are not sent
+        # as a reply to the query -- they're sent as though they're
+        # unsolicited.)
+
+        # Sanity check: we expect exactly one b'\r\n', and it will be at the
+        # end.
+        assert message.endswith(b'\r\n')
+        assert b'\r\n' not in message[:-2]
+        return False
+    
     async def raw_query(self, command: bytes) -> bytes:
         async with self.__query_lock:
             assert self.__conn is not None
             assert b'\r\n' not in command
 
             # Pause any concurrent read_unsolicited
+            unsolicited_task: asyncio.Task[bytes] | None = None
             async with self.__lock:
-                if self.__unsolicited_task is not None:
-                    self.__unsolicited_task.cancel()
-                # and it won't resume because we're holding __query_lock
+                unsolicited_task = self.__unsolicited_task
+
+            # read_unsolicited might complete here, but a new unsolicited task
+            # cannot be created because we hold query_lock.
+
+            if unsolicited_task is not None:
+                unsolicited_task.cancel()
+                # Wait for it to finish cancelling.
+                try:
+                    await unsolicited_task
+                except asyncio.CancelledError:
+                    if _i_need_to_cancel():
+                        raise
 
             self.__conn.w.write(command + b'\r\n')
             await self.__conn.w.drain()
-    
-            reply = await self.__conn.r.readuntil(self.__prompt_prefix + b'>')
-            # TODO: Actually parse out unsolicited messages
-            # Worse TODO: The QSE-CI-NWK-E helpfully sends b'QSE>' after every
-            # unsolicited monitoring message.  This means that we cannot rely on
-            # QSE> indicating the end of a query reply, and it also means we need
-            # to strip it after unsolicited monitoring messages.
-            #
-            # So far, the only way I've thought of to reliably parse multiline
-            # synchronous responses is to wait for the first line and then look
-            # for 'b'\r\nQSE>'
-            #
-            # Most likely this means that we will need to strictly distinguish between
-            # solicited and unsolicited messages by prefix, which will either require
-            # a global table or extra parameters to raw_query.
-            #
-            # Hmm, what do we do about the extra QSE> that will appear right after
-            # a command that gets no reply?
-            return reply[:-(len(self.__prompt_prefix) + 1)]
+
+            while True:
+                message = await self.__read_one_message()
+
+                if self.__is_message_a_reply(message):
+                    print(f'raw_query got {message!r} and is returning it')
+                    return message
+
+                print(f'raw_query got {message!r} and queued it for later')
+                self.__unsolicited_queue.append(message)
         
     # Reads one single unsolicited message
     async def read_unsolicited(self) -> bytes:
+        print('entered: read_unsolicited')
         assert self.__conn is not None
 
         while True:
@@ -135,11 +224,15 @@ class LutronConnection:
                     return self.__unsolicited_queue.popleft()
 
                 async with self.__lock:
-                    self.__unsolicited_task = asyncio.create_task(self.__conn.r.readuntil(b'\r\n'))
+                    self.__unsolicited_task = asyncio.create_task(self.__read_one_message())
 
             try:
                 result = await self.__unsolicited_task
             except asyncio.CancelledError:
+                if _i_need_to_cancel():
+                    print('read_unsolicited was canceled!')
+                    raise
+                print('read_unsolicited sees that __unsolicited_task was cancelled')
                 async with self.__lock:
                     self.__unsolicited_task = None
                     continue # Try again
@@ -147,6 +240,8 @@ class LutronConnection:
             async with self.__lock:
                 self.__unsolicited_task = None
 
+            print(f'read_unsolicited got {result!r}')
+            assert not self.__is_message_a_reply(result)
             return result
 
     async def disconnect(self) -> None:
