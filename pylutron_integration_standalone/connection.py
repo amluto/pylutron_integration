@@ -2,6 +2,10 @@ import asyncio
 from dataclasses import dataclass
 import re
 import collections
+from collections.abc import Callable
+import logging
+
+_LOGGER = logging.getLogger(__name__)
 
 class LoginError(Exception):
     """Exception raised when login fails."""
@@ -23,15 +27,6 @@ class DisconnectedError(Exception):
     
     def __init__(self) -> None:
         super().__init__('Disconnected')
-
-# If we catch a CancelledError and we don't want to swallow a cancellation,
-# then call we can use this.  (Python does not cleanly distinguish
-# between await raising because it awaited a canceled task and raising
-# because the awaiting task was canceled.)
-def _i_need_to_cancel() -> bool:
-    task = asyncio.current_task()
-    assert task is not None
-    return task.cancelling()
 
 @dataclass
 class _Conn:
@@ -59,38 +54,49 @@ class LutronConnection:
     """Represents an established Lutron connection."""
 
     __lock: asyncio.Lock
+    __cond: asyncio.Condition
+   
     __conn: _Conn | None  # TODO: There is no value to ever nulling this out
     __prompt_prefix: bytes
 
-    # We can only handle one query and one read_unsolicited at a time.
-    __unsolicited_lock: asyncio.Lock
-    __query_lock: asyncio.Lock
-
-    # Deadlock prevention rules: __lock nests inside __query_lock, which nests inside __unsolicited_lock.
-    # Also, read_unsolicited() may not hold __query_lock while waiting for a message to arrive, as otherwise
-    # a query could be forced to wait forever if there aren't any messages.
-
-    __unsolicited_task: asyncio.Task[bytes] | None # protected by __lock
+    # Unsolicited messages that we have read are enqueued at the
+    # end of __unsolicited_queue and are popped from the front.
+    #
+    # Protected by __lock
     __unsolicited_queue: collections.deque[bytes]
+
+    # We can only ever have synchronous reply that we've read
+    # and not consumed at a time.
+    #
+    # Protected by __lock
+    #
+    # TODO: If raw_query() is cancelled, we should probably have a
+    # clean way to give up.
+    __sync_reply: bytes | None
+
+    # Are we currently reading?  The login code does not count.
+    #
+    # Protected by __lock
+    __currently_reading: bool
 
     # Only used by __read_one_message(), which is never called
     # concurrently with itself.
     __buffered_byte: bytes
 
-    # Nests inside __query_lock and __unsolicited_lock
-    __buffer_lock: asyncio.Lock
+    # This lock serves (solely) to prevent raw_query() from being called
+    # concurrently with itself.
+    __query_lock: asyncio.Lock
 
     # TODO: We should possibly track when we are in a bad state and quickly fail future operations
     
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.__conn = _Conn(reader, writer)
-        self.__unsolicited_lock = asyncio.Lock()
-        self.__query_lock = asyncio.Lock()
         self.__lock = asyncio.Lock()
-        self.__buffer_lock = asyncio.Lock()
-        self.__unsolicited_task = None
+        self.__cond = asyncio.Condition(self.__lock)
         self.__unsolicited_queue = collections.deque()
+        self.__sync_reply = None
         self.__buffered_byte = b''
+        self.__query_lock = asyncio.Lock()
 
     @classmethod
     async def create_from_connnection(cls, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 'LutronConnection':
@@ -122,38 +128,45 @@ class LutronConnection:
         if not m:
             raise ProtocolError(f'Could not parse {(b'~MONITORING,2,' + data + b'>')!r} as a monitoring ping reply')
         self.__prompt_prefix = m[1]
+
+        self.__currently_reading = False
+
         return self
     
+    # This is the meat of the reader.  This function is the only thing that reads from
+    # the underlying StreamReader, and it is never called concurrently.
+    #
+    # We don't use cancellation ourselves, but we want to recover cleanly from
+    # a client cancelling a call, which means that we can never await something
+    # that might result in a cancellation while we are storing data that
+    # we've read in a local variable.
     async def __read_one_message(self) -> bytes:
-        print('enter __read_one_message')
+        assert self.__currently_reading
         # This needs to be cancelable and then runnable again without losing data
         assert self.__conn is not None
-        async with self.__buffer_lock:
+        if not self.__buffered_byte:
+            self.__buffered_byte = await self.__conn.r.read(1)
+
             if not self.__buffered_byte:
-                self.__buffered_byte = await self.__conn.r.read(1)
+                # We got EOF.
+                raise DisconnectedError()
 
-                if not self.__buffered_byte:
-                    # We got EOF.
-                    raise DisconnectedError()
+        if self.__buffered_byte == self.__prompt_prefix[0:1]:
+            # We got Q and expect SE>
+            expected = self.__prompt_prefix[1:] + b'>'
+            data = await self.__conn.r.readexactly(len(expected))
+            if data != expected:
+                raise ProtocolError(f'Expected {expected!r} but received {data!r}')
+            self.__buffered_byte = b''
+            return b''
+        else:
+            # We got the first byte of a message and expect the rest of it
+            # followed by b'\r\nQSE>'
+            data = await self.__conn.r.readuntil(b'\r\n' + self.__prompt_prefix + b'>')
+            result = self.__buffered_byte + data[:-(len(self.__prompt_prefix) + 1)] # strip the QSE>
+            self.__buffered_byte = b''
+            return result
 
-            if self.__buffered_byte == self.__prompt_prefix[0:1]:
-                # We got Q and expect SE>
-                expected = self.__prompt_prefix[1:] + b'>'
-                data = await self.__conn.r.readexactly(len(expected))
-                if data != expected:
-                    raise ProtocolError(f'Expected {expected!r} but received {data!r}')
-                self.__buffered_byte = b''
-                print('__read_one_message: returning blank')
-                return b''
-            else:
-                # We got the first byte of a message and expect the rest of it
-                # followed by b'\r\nQSE>'
-                data = await self.__conn.r.readuntil(b'\r\n' + self.__prompt_prefix + b'>')
-                result = self.__buffered_byte + data[:-(len(self.__prompt_prefix) + 1)] # strip the QSE>
-                self.__buffered_byte = b''
-                print(f'__read_one_message: returning {result!r}')
-                return result
-            
     def __is_message_a_reply(self, message: bytes) -> bool:
         # If it's blank (i.e. they send b'QSE>'), then it's a reply.
         if not message:
@@ -175,73 +188,70 @@ class LutronConnection:
         assert b'\r\n' not in message[:-2]
         return False
     
+    # Reads one message and stores the result in the appropriate member variables(s)
+    async def __read_and_dispatch(self):
+        _LOGGER.debug('Enter __read_and_dispatch')
+        data = await self.__read_one_message()
+        if not self.__is_message_a_reply(data):
+            self.__unsolicited_queue.append(data)
+            _LOGGER.debug('Received unsolicited message: %s', repr(data))
+        else:
+            if self.__sync_reply is not None:
+                _LOGGER.error("Received syncronous message %s before handling prior sync message %s", (repr(data), repr(self.__sync_reply)))
+
+                # TODO: Also throw an exception?  Record that we're broken?
+            self.__sync_reply = data
+            _LOGGER.debug('Read synchronous message: %s', repr(data))
+        self.__cond.notify_all()
+    
+    # Reads until predicate returns true.  May be called concurrently.
+    # Needs to tolerate cancellation.
+    #
+    # Caller must hold self.__cond
+    async def __wait_for_data(self, predicate: Callable[[], bool]):
+        assert self.__cond.locked()
+
+        while True:
+            if predicate():
+                return
+
+            if self.__currently_reading:
+                await self.__cond.wait()
+                continue
+
+            try:
+                self.__currently_reading = True
+                await self.__read_and_dispatch()
+            finally:
+                self.__currently_reading = False
+    
     async def raw_query(self, command: bytes) -> bytes:
+        assert self.__conn is not None
+
         async with self.__query_lock:
-            assert self.__conn is not None
+            async with self.__cond:
+                if self.__sync_reply is not None:
+                    raise ProtocolError('raw_query called while a synchronous reply was already pending')
+
             assert b'\r\n' not in command
-
-            # Pause any concurrent read_unsolicited
-            unsolicited_task: asyncio.Task[bytes] | None = None
-            async with self.__lock:
-                unsolicited_task = self.__unsolicited_task
-
-            # read_unsolicited might complete here, but a new unsolicited task
-            # cannot be created because we hold query_lock.
-
-            if unsolicited_task is not None:
-                unsolicited_task.cancel()
-                # Wait for it to finish cancelling.
-                try:
-                    await unsolicited_task
-                except asyncio.CancelledError:
-                    if _i_need_to_cancel():
-                        raise
 
             self.__conn.w.write(command + b'\r\n')
             await self.__conn.w.drain()
 
-            while True:
-                message = await self.__read_one_message()
+            async with self.__cond:
+                await self.__wait_for_data(lambda: self.__sync_reply is not None)
 
-                if self.__is_message_a_reply(message):
-                    print(f'raw_query got {message!r} and is returning it')
-                    return message
-
-                print(f'raw_query got {message!r} and queued it for later')
-                self.__unsolicited_queue.append(message)
+                assert self.__sync_reply is not None
+                reply = self.__sync_reply
+                self.__sync_reply = None
+                return reply
         
     # Reads one single unsolicited message
     async def read_unsolicited(self) -> bytes:
-        print('entered: read_unsolicited')
-        assert self.__conn is not None
+        async with self.__cond:
+            await self.__wait_for_data(lambda: len(self.__unsolicited_queue) >= 1)
 
-        while True:
-            async with self.__query_lock:
-                # Why did we take the lock?  For two reasons:
-                # 1. If there is a query in progress, we need to wait for it to finish.
-                # 2. It protects __unsolicited_queue.
-                if len(self.__unsolicited_queue):
-                    return self.__unsolicited_queue.popleft()
-
-                async with self.__lock:
-                    self.__unsolicited_task = asyncio.create_task(self.__read_one_message())
-
-            try:
-                result = await self.__unsolicited_task
-            except asyncio.CancelledError:
-                if _i_need_to_cancel():
-                    print('read_unsolicited was canceled!')
-                    raise
-                print('read_unsolicited sees that __unsolicited_task was cancelled')
-                async with self.__lock:
-                    self.__unsolicited_task = None
-                    continue # Try again
-
-            async with self.__lock:
-                self.__unsolicited_task = None
-
-            print(f'read_unsolicited got {result!r}')
-            assert not self.__is_message_a_reply(result)
+            result = self.__unsolicited_queue.popleft()
             return result
 
     async def disconnect(self) -> None:
