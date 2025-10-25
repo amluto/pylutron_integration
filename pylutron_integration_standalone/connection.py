@@ -161,7 +161,7 @@ class LutronConnection:
         
         # If it starts with b'~DETAILS,' or b'~ERROR,', then it's a reply
         upper = message.upper()
-        if upper.startswith(b'~DETAILS') or upper.startswith(b'~ERROR'):
+        if upper.startswith(b'~DETAILS') or upper.startswith(b'~ERROR') or upper.startswith(b'~INTEGRATIONID'):
             return True
         
         # Otherwise it's not a reply.  (Note that messages like ~DEVICE
