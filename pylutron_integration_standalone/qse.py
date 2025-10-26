@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from . import connection
+from .devices import SerialNumber
 import re
 
 # Notes:
@@ -36,35 +37,6 @@ class ParseError(Exception):
     
     def __init__(self, message: str) -> None:
         super().__init__(str)
-
-_SN_RE = re.compile(b'(?:0x)?([0-9A-Fa-f]{0,8})', re.S)
-
-# A serial number, as reported by the NWK, is an optional 0x followed by
-# 8 hexadecimal digits, with inconsistent case.  The NWK accepts a serial
-# number with up to two 0x prefixes followed by any number (maybe up to
-# some limit) of zeros followed by case-insensitive hex digits.
-#
-# Some but not all commands will accept an integration id in place of
-# a serial number.  The NWK can get extremely confused if there is an
-# integration id that is also a well-formed serial number.
-#
-# This class represents a canonicalized serial number.  It's hashable.
-@dataclass(order=False, eq=True, frozen=True)
-class SerialNumber:
-    sn: bytes
-
-    def __init__(self, sn: bytes):
-        m = _SN_RE.fullmatch(sn)
-        if not m:
-            raise ValueError(f'Malformed serial number {sn!r}')
-        sn = m[1]
-        object.__setattr__(self, 'sn', b'0' * (8 - len(sn)) + sn.upper())
-
-    def __repr__(self):
-        return f'SerialNumber({self.sn!r})'
-    
-    def __str__(self):
-        return self.sn.decode()
 
 @dataclass
 class DeviceDetails:
@@ -136,6 +108,7 @@ def parse_details(data: bytes) -> list[DeviceDetails]:
     
     return result
 
+# TODO: This isn't just QSE.  Homeworks QS, Quantum, and myRoom Plus support this.  
 @dataclass
 class IntegrationIDRecord:
     iid: bytes
@@ -154,8 +127,8 @@ class LutronUniverse:
 
 _IIDLINE_RE = re.compile(b'~INTEGRATIONID,([^,]+),(DEVICE|OUTPUT),([0-9A-Fa-fx]+)(?:,([0-9]+))?', re.S)
 
-async def enumerate_universe(qse: connection.LutronConnection) -> LutronUniverse:
-    all_devices = parse_details(await qse.raw_query(b'?DETAILS,ALL_DEVICES'))
+async def enumerate_universe(conn: connection.LutronConnection) -> LutronUniverse:
+    all_devices = parse_details(await conn.raw_query(b'?DETAILS,ALL_DEVICES'))
 
     universe = LutronUniverse()
     universe.devices_by_sn = {d.sn: d for d in all_devices}
@@ -163,7 +136,7 @@ async def enumerate_universe(qse: connection.LutronConnection) -> LutronUniverse
     # Now we need to read all the integration ids.  The device integration ids
     # are already known, but we need the output integration ids.
     universe.output_ids = {}
-    integration_ids = await qse.raw_query(b'?INTEGRATIONID,3')
+    integration_ids = await conn.raw_query(b'?INTEGRATIONID,3')
     iidlines = integration_ids.split(b'\r\n')
 
     if not iidlines or iidlines[-1] != b'':
@@ -182,3 +155,12 @@ async def enumerate_universe(qse: connection.LutronConnection) -> LutronUniverse
             universe.output_ids[m[1]] = (sn, int(m[4]))
 
     return universe
+
+async def wip_probe_universe_components(conn: connection.LutronConnection, univ: LutronUniverse):
+    # Good news: you can probe like this!
+    # Mediocre news: outputs with assigned integration ids are reported by integration id
+    # Bad news: I noticed that #OUTPUT doesn't result in what we consider to be a sync reply
+    for d in univ.devices_by_sn.values():
+        _, results = await conn.raw_query_collect(b'?DEVICE,%s,0,0' % d.sn.sn)
+        for result in results:
+            print(f"SN {d.sn}: {result.decode().strip()}")

@@ -7,6 +7,28 @@ import logging
 
 _LOGGER = logging.getLogger(__name__)
 
+# A message we received that, when converted to uppercase,
+# starts with one of these prefixes, is considered to be a synchronous
+# reply to a query.  Additionally, the empty string is a synchronous
+# reply.  We consider a query to be answered when we receive a synchronous
+# reply followed by a prompt.
+#
+# This appears to be completely reliably on QSE-CI-NWK-E with one
+# exception: #OUTPUT and ?OUTPUT commands, at least on verrsion
+# 8.60, produce no output per se.  The NWK sends a ~OUTPUT, but
+# that's entirely indistinguishable from an *unsolicited* message.
+#
+# The best solution found so far is to avoid ever sending #OUTPUT
+# or ?OUTPUT, which, conveniently, is never necessary on QS
+# standalone, as #DEVICE and ?DEVICE handle all cases and more.
+_REPLY_PREFIXES = [
+    b'~DETAILS',
+    b'~ERROR',
+    b'~INTEGRATIONID',
+    b'~PROGRAMMING',
+    b'~ETHERNET'
+]
+
 class LoginError(Exception):
     """Exception raised when login fails."""
     
@@ -32,6 +54,11 @@ class DisconnectedError(Exception):
 class _Conn:
     r: asyncio.StreamReader
     w: asyncio.StreamWriter
+
+@dataclass
+class _CurrentQuery:
+    reply: None | bytes
+    unsolicited_messages: None | list[bytes]
 
 # Monitoring messages may be arbitrarily interspersed with actual replies, and
 # there is no mechanism in the protocol to tell which messages are part of a reply vs.
@@ -65,14 +92,11 @@ class LutronConnection:
     # Protected by __lock
     __unsolicited_queue: collections.deque[bytes]
 
-    # We can only ever have synchronous reply that we've read
-    # and not consumed at a time.
+    # While running a query, this is not None and it contains the
+    # collected results
     #
     # Protected by __lock
-    #
-    # TODO: If raw_query() is cancelled, we should probably have a
-    # clean way to give up.
-    __sync_reply: bytes | None
+    __current_query: _CurrentQuery | None
 
     # Are we currently reading?  The login code does not count.
     #
@@ -94,7 +118,6 @@ class LutronConnection:
         self.__lock = asyncio.Lock()
         self.__cond = asyncio.Condition(self.__lock)
         self.__unsolicited_queue = collections.deque()
-        self.__sync_reply = None
         self.__buffered_byte = b''
         self.__query_lock = asyncio.Lock()
 
@@ -130,8 +153,15 @@ class LutronConnection:
         self.__prompt_prefix = m[1]
 
         self.__currently_reading = False
+        self.__current_query = None
 
         return self
+    
+    # This returns the protocol name as inferred from the prompt.
+    # For example, QS Standalong is b'QSE'.
+    @property
+    def protocol_name(self) -> bytes:
+        return self.__prompt_prefix
     
     # This is the meat of the reader.  This function is the only thing that reads from
     # the underlying StreamReader, and it is never called concurrently.
@@ -171,11 +201,12 @@ class LutronConnection:
         # If it's blank (i.e. they send b'QSE>'), then it's a reply.
         if not message:
             return True
-        
-        # If it starts with b'~DETAILS,' or b'~ERROR,', then it's a reply
+
+        # Is it in our list of reply prefixes?
         upper = message.upper()
-        if upper.startswith(b'~DETAILS') or upper.startswith(b'~ERROR') or upper.startswith(b'~INTEGRATIONID'):
-            return True
+        for prefix in _REPLY_PREFIXES:
+            if upper.startswith(prefix):
+                return True
         
         # Otherwise it's not a reply.  (Note that messages like ~DEVICE
         # may well be sent as a result of a query, but they are not sent
@@ -189,20 +220,32 @@ class LutronConnection:
         return False
     
     # Reads one message and stores the result in the appropriate member variables(s)
+    #
+    # Caller must hold self.__cond
     async def __read_and_dispatch(self):
-        _LOGGER.debug('Enter __read_and_dispatch')
         data = await self.__read_one_message()
         if not self.__is_message_a_reply(data):
             self.__unsolicited_queue.append(data)
-            _LOGGER.debug('Received unsolicited message: %s', repr(data))
-        else:
-            if self.__sync_reply is not None:
-                _LOGGER.error("Received syncronous message %s before handling prior sync message %s", (repr(data), repr(self.__sync_reply)))
 
-                # TODO: Also throw an exception?  Record that we're broken?
-            self.__sync_reply = data
-            _LOGGER.debug('Read synchronous message: %s', repr(data))
-        self.__cond.notify_all()
+            if self.__current_query and self.__current_query.unsolicited_messages is not None:
+                self.__current_query.unsolicited_messages.append(data)
+                _LOGGER.debug('Received semi-solicited message: %s', repr(data))
+            else:
+                _LOGGER.debug('Received unsolicited message: %s', repr(data))
+
+            self.__cond.notify_all()
+        else:
+            if self.__current_query is None:
+                _LOGGER.error("Received unexpected syncronous message %s", repr(data))
+                return # No need to notify_all()
+
+            if self.__current_query.reply is not None:
+                _LOGGER.error("Received syncronous message %s before handling prior sync message %s", (repr(data), repr(self.__current_query.reply)))
+                return # No need to notify_all()
+            
+            _LOGGER.debug('Received synchronous message: %s', repr(data))
+            self.__current_query.reply = data
+            self.__cond.notify_all()
     
     # Reads until predicate returns true.  May be called concurrently.
     # Needs to tolerate cancellation.
@@ -225,13 +268,14 @@ class LutronConnection:
             finally:
                 self.__currently_reading = False
     
-    async def raw_query(self, command: bytes) -> bytes:
+    async def __raw_query(self, command: bytes, unsolicited_out: None | list[bytes] = None) -> bytes:
         assert self.__conn is not None
 
         async with self.__query_lock:
             async with self.__cond:
-                if self.__sync_reply is not None:
-                    raise ProtocolError('raw_query called while a synchronous reply was already pending')
+                if self.__current_query:
+                    raise ProtocolError('raw_query called while a query in in progress (did you cancel and try again)')
+                self.__current_query = _CurrentQuery(reply=None, unsolicited_messages=unsolicited_out)
 
             assert b'\r\n' not in command
 
@@ -239,13 +283,31 @@ class LutronConnection:
             await self.__conn.w.drain()
 
             async with self.__cond:
-                await self.__wait_for_data(lambda: self.__sync_reply is not None)
+                await self.__wait_for_data(lambda: self.__current_query.reply is not None)
 
-                assert self.__sync_reply is not None
-                reply = self.__sync_reply
-                self.__sync_reply = None
+                assert self.__current_query.reply is not None
+                reply = self.__current_query.reply
+                self.__current_query = None
                 return reply
-        
+
+    # Issues a command and returns the synchronous reply.    
+    async def raw_query(self, command: bytes) -> bytes:
+        return await self.__raw_query(command, None)
+
+    # Issues a command and returns the synchronous reply and
+    # a copy of all unsolicited messages received starting just before
+    # sending the command and receiving the synchronous reply.
+    # This is inherently racy and may return earlier unsolicited messages
+    # as well.  It will not prevent read_unsolicited() from receiving the
+    # same messages.
+    #
+    # This is useful for probing devices or outputs without interfering
+    # with whatever other code might be using read_unsolicited()
+    async def raw_query_collect(self, command: bytes) -> tuple[bytes, list[bytes]]:
+        unsolicited_out: list[bytes] = []
+        reply = await self.__raw_query(command, unsolicited_out)
+        return (reply, unsolicited_out)
+
     # Reads one single unsolicited message
     async def read_unsolicited(self) -> bytes:
         async with self.__cond:
@@ -301,3 +363,13 @@ async def login(
         return await LutronConnection.create_from_connnection(reader, writer)
     else:
         raise LoginError(response)
+
+async def dump_replies(conn: LutronConnection):
+    try:
+        async with asyncio.timeout(0.25):
+            while True:
+                # It would be nice to just do this until it would block, but StreamReader doesn't
+                # have a nonblocking read operation
+                print(repr(await conn.read_unsolicited()))
+    except TimeoutError:
+        pass
