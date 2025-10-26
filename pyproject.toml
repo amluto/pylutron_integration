@@ -1,0 +1,7 @@
+[project]
+name = "pylutron-integration"
+version = "0.0.0"
+description = "Lutron Integration Protocol client"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
