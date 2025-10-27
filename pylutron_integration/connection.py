@@ -26,7 +26,8 @@ _REPLY_PREFIXES = [
     b'~ERROR',
     b'~INTEGRATIONID',
     b'~PROGRAMMING',
-    b'~ETHERNET'
+    b'~ETHERNET',
+    b'~MONITORING'
 ]
 
 class LoginError(Exception):
@@ -216,7 +217,7 @@ class LutronConnection:
         # Sanity check: we expect exactly one b'\r\n', and it will be at the
         # end.
         assert message.endswith(b'\r\n')
-        assert b'\r\n' not in message[:-2]
+        assert b'\r\n' not in message[:-2], f'Unsolicited message {message!r} has too many lines'
         return False
     
     # Reads one message and stores the result in the appropriate member variables(s)

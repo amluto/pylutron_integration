@@ -1,4 +1,4 @@
-= What is this? =
+# What is this? #
 
 pylutron_integration is a a client library for the Lutron Integration Protocol.
 This is a protocol used by a number of different Lutron products, documented here:
@@ -41,12 +41,20 @@ pylutron_integration presently has no dependencies at all outside the standard l
 and I would like to keep it that way unless there is a fairly compelling reason
 to add a dependency.
 
-= Usage =
+# Usage #
 
 Users of this library are responsible for connecting to the integration access point
-on their own.
+on their own, which generally involves figuring out what IP address and TCP port
+(hint: 23) to connect to and using `await asyncio.open_connection(address, port)`
+or doing whatever incantation is appropriate on your platform to connect to a
+serial port.
 
 (Lots more to write here)
+
+pylutron_integration is fully async and very strongly respects the idea of
+structured concurrency: it does not create tasks at all.  If you want the
+library do so something, you call it.  If you are not actively calling it,
+it does nothing!
 
 
 [lip]: https://assets.lutron.com/a/documents/040249.pdf
