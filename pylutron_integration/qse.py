@@ -117,6 +117,7 @@ class IntegrationIDRecord:
 
 class LutronUniverse:
     devices_by_sn: dict[SerialNumber, DeviceDetails]
+    devices_by_iid: dict[bytes, DeviceDetails]
 
     # Maps output integration ids to the device sn and output/zone number
     output_ids: dict[bytes, tuple[SerialNumber, int]]
@@ -132,6 +133,7 @@ async def enumerate_universe(conn: connection.LutronConnection) -> LutronUnivers
 
     universe = LutronUniverse()
     universe.devices_by_sn = {d.sn: d for d in all_devices}
+    universe.devices_by_iid = {d.integration_id: d for d in all_devices if d.integration_id != b'(Not Set)'}
 
     # Now we need to read all the integration ids.  The device integration ids
     # are already known, but we need the output integration ids.
