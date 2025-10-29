@@ -97,7 +97,7 @@ class ComponentGroup:
     
     def lookup_component(self, number: int) -> int | None:
         """Check if this group contains a component number.
-        
+
         Returns the 1-based index if found, None otherwise.
         """
         if self.numbers is not None:
@@ -116,6 +116,26 @@ class ComponentGroup:
                     if 1 <= index <= self.array_spec.count:
                         return index
             return None
+
+    def component_number(self, index: int) -> int | None:
+        """Get the component number for a 1-based index.
+
+        Args:
+            index: 1-based index into this component group
+
+        Returns:
+            Component number if index is valid, None otherwise.
+        """
+        if index < 1 or index > self.count:
+            return None
+
+        if self.numbers is not None:
+            # Arbitrary mode
+            return self.numbers[index - 1]
+        else:
+            # Array mode
+            assert self.array_spec is not None
+            return self.array_spec.base + (index - 1) * self.array_spec.stride
 
 class DeviceClass:
     """Represents a device type with its component groups and individual components."""

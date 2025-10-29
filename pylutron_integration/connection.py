@@ -224,7 +224,14 @@ class LutronConnection:
     #
     # Caller must hold self.__cond
     async def __read_and_dispatch(self):
-        data = await self.__read_one_message()
+        # TODO: I'm not thrilled with this unlock-and-relock sequence.
+        # Getting rid of it would require refactoring the callers.
+        self.__cond.release()
+        try:
+            data = await self.__read_one_message()
+        finally:
+            await self.__cond.acquire()
+
         if not self.__is_message_a_reply(data):
             self.__unsolicited_queue.append(data)
 
