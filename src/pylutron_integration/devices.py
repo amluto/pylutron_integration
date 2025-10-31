@@ -2,6 +2,10 @@ from dataclasses import dataclass
 from enum import Enum
 import re
 from . import types
+import logging
+import qse
+
+_LOGGER = logging.getLogger(__name__)
 
 # These are DEVICE actions.  OUTPUT actions are different.
 class Action(Enum):
@@ -182,6 +186,7 @@ Shade = DeviceClass(
     ]
 )
 
+# TODO: This isn't great: a shade power supply is 'SHADES(3)' but is not a shade
 FAMILY_TO_CLASS[b'GRAFIK_EYE(2)'] = GrafikEyeQS
 FAMILY_TO_CLASS[b'SHADES(3)'] = Shade
 
@@ -191,8 +196,63 @@ def action_to_friendly_str(action: int):
     except ValueError:
         return str(action)
 
-from . import qse
-def decode_device_update(message: bytes, universe: qse.LutronUniverse):
+@dataclass
+class DeviceUpdateValues:
+    component: int
+    action: Action
+    params: tuple[bytes]
+
+
+@dataclass
+class DeviceUpdate:
+    """Represents a parsed device update message."""
+
+    serial_number: SerialNumber
+    component: int
+    action: int
+    value: tuple[bytes, ...]
+
+_DEVICE_UPDATE_RE = re.compile(rb"~DEVICE,([^,]+),(\d+),(\d+)(?:,([^\r]*))?\r\n", re.S)
+
+def decode_device_update(message: bytes, universe: qse.LutronUniverse) -> DeviceUpdate | None:
+    """Parse a ~DEVICE message into a DeviceUpdate.
+
+    Args:
+        message: Raw ~DEVICE message bytes
+        universe: LutronUniverse for resolving device identifiers
+
+    Returns:
+        DeviceUpdate if message was parsed successfully, None otherwise
+    """
+
+    # ~DEVICE,<identifier>,<component>,<action>[,<params>]\r\n
+    match = _DEVICE_UPDATE_RE.fullmatch(message)
+    if not match:
+        _LOGGER.debug(f"Failed to parse device message: {message!r}")
+        return None
+
+    device_identifier = match[1]
+    component = int(match[2])
+    action = int(match[3])
+    value = tuple(b','.split(match[4])) if match[4] else ()
+
+    # Resolve device identifier to serial number
+    try:
+        sn = types.SerialNumber(device_identifier)
+    except ValueError:
+        # Not a serial number, try integration ID
+        if device_identifier in universe.devices_by_iid:
+            sn = universe.devices_by_iid[device_identifier].sn
+        else:
+            _LOGGER.debug("Unknown device identifier: %s", device_identifier)
+            return None
+
+    return DeviceUpdate(
+        serial_number=sn, component=component, action=action, value=value
+    )
+
+# This is temporary
+def print_device_update(message: bytes, universe: qse.LutronUniverse):
     m = re.compile(b'~DEVICE,([^,]*),(\\d+),(\\d+)(?:,([^\\r]*))?\\r\\n', re.S).fullmatch(message)
     if not m:
         print(f'Regex fail: {message!r}')
