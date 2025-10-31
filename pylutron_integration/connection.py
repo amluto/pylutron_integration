@@ -4,6 +4,7 @@ import re
 import collections
 from collections.abc import Callable
 import logging
+from . import types
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -323,6 +324,19 @@ class LutronConnection:
 
             result = self.__unsolicited_queue.popleft()
             return result
+        
+    # Higher-level queries
+
+    # Gets the most recent for all components that respond to probes.
+    async def probe_device(self, dev_id: types.SerialNumber | bytes) -> None:
+        if isinstance(dev_id, bytes):
+            target = dev_id
+        else:
+            assert isinstance(dev_id, types.SerialNumber)
+            target = dev_id.sn
+        _, _ = await self.raw_query_collect(b'?DEVICE,%s,0,0' % target)
+        #TODO: return the results?
+
 
     async def disconnect(self) -> None:
         if self.__conn is None:

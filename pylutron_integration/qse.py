@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from . import connection
-from .devices import SerialNumber
+from .types import SerialNumber
 import re
 
 # Notes:
