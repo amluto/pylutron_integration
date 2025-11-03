@@ -1,9 +1,8 @@
 from dataclasses import dataclass
 from enum import Enum
 import re
-from . import types
+from . import types, qse
 import logging
-import qse
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -207,9 +206,9 @@ class DeviceUpdateValues:
 class DeviceUpdate:
     """Represents a parsed device update message."""
 
-    serial_number: SerialNumber
+    serial_number: types.SerialNumber
     component: int
-    action: int
+    action: Action
     value: tuple[bytes, ...]
 
 _DEVICE_UPDATE_RE = re.compile(rb"~DEVICE,([^,]+),(\d+),(\d+)(?:,([^\r]*))?\r\n", re.S)
@@ -233,8 +232,8 @@ def decode_device_update(message: bytes, universe: qse.LutronUniverse) -> Device
 
     device_identifier = match[1]
     component = int(match[2])
-    action = int(match[3])
-    value = tuple(b','.split(match[4])) if match[4] else ()
+    action_int = int(match[3])
+    value = tuple(match[4].split(b',')) if match[4] else ()
 
     # Resolve device identifier to serial number
     try:
@@ -246,6 +245,12 @@ def decode_device_update(message: bytes, universe: qse.LutronUniverse) -> Device
         else:
             _LOGGER.debug("Unknown device identifier: %s", device_identifier)
             return None
+        
+    try:
+        action = Action(action_int)
+    except ValueError:
+        _LOGGER.debug(f"Unknown action {action_int} in update {message!r}")
+        return None
 
     return DeviceUpdate(
         serial_number=sn, component=component, action=action, value=value
