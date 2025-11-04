@@ -1,5 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
+from enum import Enum
 
 _SN_RE = re.compile(b'(?:0x)?([0-9A-Fa-f]{0,8})', re.S)
 
@@ -35,3 +36,46 @@ class SerialNumber:
     def __str__(self):
         return self.sn.decode()
 
+# These are DEVICE actions.  OUTPUT actions are different.
+class DeviceAction(Enum):
+    ENABLE = 1
+    DISABLE = 2
+    PRESS_CLOSE_UNOCC = 3
+    RELEASE_OPEN_OCC = 4
+    HOLD = 5
+    DOUBLE_TAP = 6
+    CURRENT_SCENE = 7
+    LED_STATE = 9
+    SCENE_SAVE = 12
+    LIGHT_LEVEL = 14
+    ZONE_LOCK = 15
+    SCENE_LOCK = 16
+    SEQUENCE_STATE = 17
+    START_RAISING = 18
+    START_LOWERING = 19
+    STOP_RAISING_LOWERING = 20
+    HOLD_RELEASE = 32 # for keypads -- I have no idea what it does
+    TIMECLOCK_STATE = 34 # 0 = disabled, 1 = enabled
+
+    # 21 is a mysterious property of the SHADE component of shades.
+    # It seems to have the value 0 most of the time but has other values when the shade
+    # is moving.
+    MOTOR_MYSTERY = 21
+    
+@dataclass
+class IntegrationIDMap:
+    # Maps output integration ids to the device sn and output/zone number
+    output_ids: dict[bytes, tuple[SerialNumber, int]] = field(default_factory = dict)
+
+    # Maps device integration ids to the device sn
+    device_ids: dict[bytes, SerialNumber] = field(default_factory = dict)
+
+    # We don't bother storing the reverse mapping anywhere -- we need
+    # to be able to control outputs that don't have integration IDs,
+    # and there appears to be no benefit to ever sending an #OUTPUT command.
+
+class ParseError(Exception):
+    """Exception raised when a message doesn't parse correctly."""
+    
+    def __init__(self, message: str) -> None:
+        super().__init__(str)

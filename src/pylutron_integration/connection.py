@@ -321,13 +321,13 @@ class LutronConnection:
     async def ping(self) -> None:
         await self.raw_query(b'')
 
-    async def send_device_command(self, dev: types.SerialNumber | bytes, component: int, action: int,
+    async def send_device_command(self, dev: types.SerialNumber | bytes, component: int, action: types.DeviceAction,
                                    params: Iterable[bytes]) -> None:
         if isinstance(dev, types.SerialNumber):
             sn = dev.sn
         else:
             sn = dev
-        command = b'#DEVICE,%s,%d,%d,%s' % (sn, component, action, b','.join(params))
+        command = b'#DEVICE,%s,%d,%d,%s' % (sn, component, action.value, b','.join(params))
         await self.raw_query(command)
 
     # Reads one single unsolicited message
@@ -341,15 +341,13 @@ class LutronConnection:
     # Higher-level queries
 
     # Gets the most recent for all components that respond to probes.
-    async def probe_device(self, dev_id: types.SerialNumber | bytes) -> None:
+    async def probe_device(self, dev_id: types.SerialNumber | bytes) -> tuple[bytes, list[bytes]]:
         if isinstance(dev_id, bytes):
             target = dev_id
         else:
             assert isinstance(dev_id, types.SerialNumber)
             target = dev_id.sn
-        _, _ = await self.raw_query_collect(b'?DEVICE,%s,0,0' % target)
-        #TODO: return the results?
-
+        return await self.raw_query_collect(b'?DEVICE,%s,0,0' % target)
 
     async def disconnect(self) -> None:
         if self.__conn is None:

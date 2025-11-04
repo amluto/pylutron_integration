@@ -1,37 +1,11 @@
 from dataclasses import dataclass
 from enum import Enum
 import re
-from . import types, qse
+from . import types, qse, connection
 import logging
 
 _LOGGER = logging.getLogger(__name__)
 
-# These are DEVICE actions.  OUTPUT actions are different.
-class Action(Enum):
-    ENABLE = 1
-    DISABLE = 2
-    PRESS_CLOSE_UNOCC = 3
-    RELEASE_OPEN_OCC = 4
-    HOLD = 5
-    DOUBLE_TAP = 6
-    CURRENT_SCENE = 7
-    LED_STATE = 9
-    SCENE_SAVE = 12
-    LIGHT_LEVEL = 14
-    ZONE_LOCK = 15
-    SCENE_LOCK = 16
-    SEQUENCE_STATE = 17
-    START_RAISING = 18
-    START_LOWERING = 19
-    STOP_RAISING_LOWERING = 20
-    HOLD_RELEASE = 32 # for keypads -- I have no idea what it does
-    TIMECLOCK_STATE = 34 # 0 = disabled, 1 = enabled
-
-    # 21 is a mysterious property of the SHADE component of shades.
-    # It seems to have the value 0 most of the time but has other values when the shade
-    # is moving.
-    MOTOR_MYSTERY = 21
-    
 @dataclass(frozen=True)
 class ArraySpec:
     count: int
@@ -191,14 +165,14 @@ FAMILY_TO_CLASS[b'SHADES(3)'] = Shade
 
 def action_to_friendly_str(action: int):
     try:
-        return Action(action).name
+        return types.DeviceAction(action).name
     except ValueError:
         return str(action)
 
 @dataclass
 class DeviceUpdateValues:
     component: int
-    action: Action
+    action: types.DeviceAction
     params: tuple[bytes]
 
 
@@ -208,12 +182,12 @@ class DeviceUpdate:
 
     serial_number: types.SerialNumber
     component: int
-    action: Action
+    action: types.DeviceAction
     value: tuple[bytes, ...]
 
 _DEVICE_UPDATE_RE = re.compile(rb"~DEVICE,([^,]+),(\d+),(\d+)(?:,([^\r]*))?\r\n", re.S)
 
-def decode_device_update(message: bytes, universe: qse.LutronUniverse) -> DeviceUpdate | None:
+def decode_device_update(message: bytes, iidmap: types.IntegrationIDMap) -> DeviceUpdate | None:
     """Parse a ~DEVICE message into a DeviceUpdate.
 
     Args:
@@ -240,14 +214,14 @@ def decode_device_update(message: bytes, universe: qse.LutronUniverse) -> Device
         sn = types.SerialNumber(device_identifier)
     except ValueError:
         # Not a serial number, try integration ID
-        if device_identifier in universe.devices_by_iid:
-            sn = universe.devices_by_iid[device_identifier].sn
+        if device_identifier in iidmap.device_ids:
+            sn = iidmap.device_ids[device_identifier].sn
         else:
             _LOGGER.debug("Unknown device identifier: %s", device_identifier)
             return None
         
     try:
-        action = Action(action_int)
+        action = types.DeviceAction(action_int)
     except ValueError:
         _LOGGER.debug(f"Unknown action {action_int} in update {message!r}")
         return None
@@ -256,32 +230,32 @@ def decode_device_update(message: bytes, universe: qse.LutronUniverse) -> Device
         serial_number=sn, component=component, action=action, value=value
     )
 
-# This is temporary
-def print_device_update(message: bytes, universe: qse.LutronUniverse):
-    m = re.compile(b'~DEVICE,([^,]*),(\\d+),(\\d+)(?:,([^\\r]*))?\\r\\n', re.S).fullmatch(message)
-    if not m:
-        print(f'Regex fail: {message!r}')
-        return None
+_IIDLINE_RE = re.compile(b'~INTEGRATIONID,([^,]+),(DEVICE|OUTPUT),([0-9A-Fa-fx]+)(?:,([0-9]+))?', re.S)
 
-    device_identifier = m[1]
-    try:
-        sn = types.SerialNumber(device_identifier)
-        device = universe.devices_by_sn[sn]
-    except ValueError:
-        if device_identifier in universe.devices_by_iid:
-            device = universe.devices_by_iid[device_identifier]
+async def enumerate_iids(conn: connection.LutronConnection) -> types.IntegrationIDMap:
+    iidmap = types.IntegrationIDMap()
+
+    integration_ids = await conn.raw_query(b'?INTEGRATIONID,3')
+    iidlines = integration_ids.split(b'\r\n')
+
+    if not iidlines or iidlines[-1] != b'':
+        raise types.ParseError('~INTEGRATIONIDS,3 list does not split correctly')
+    iidlines = iidlines[:-1]
+
+    for line in iidlines:
+        m = _IIDLINE_RE.fullmatch(line)
+        if not m:
+            raise types.ParseError(f'Integration id line {line!r} does not parse')
+        name = m[1]
+        if name == b'(Not Set)':
+            # If we ever support a dialect that does not support ?DETAILS, then we could
+            # use the (Not Set) lines as a way to discover devices without integration IDs.
+            # This is not necessary for QS Standalone.
+            continue
+        sn = types.SerialNumber(m[3])
+        if m[2] == b'DEVICE':
+            iidmap.device_ids[name] = sn
         else:
-            print(f'Unknown device {m[1]!r}')
-            return # not a serial number
+            iidmap.output_ids[name] = (sn, int(m[4]))
 
-    if device.family in FAMILY_TO_CLASS:
-        devclass = FAMILY_TO_CLASS[device.family]
-        comp = devclass.lookup_component(int(m[2]))
-        if comp is not None:
-            cg, idx = comp
-            print(f'{cg.name} {idx} {action_to_friendly_str(int(m[3]))} {m[4]!r}')
-        else:
-            print(f'Unknown component in {message!r}: from {device.family.decode()} / {device.product.decode()}')
-    else:
-        print(f'Unknown family in {message!r}: from {device.family.decode()} / {device.product.decode()}')
-
+    return iidmap
