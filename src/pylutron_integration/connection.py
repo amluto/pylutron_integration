@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import dataclass
 import re
 import collections
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 import logging
 from . import types
 
@@ -316,6 +316,19 @@ class LutronConnection:
         unsolicited_out: list[bytes] = []
         reply = await self.__raw_query(command, unsolicited_out)
         return (reply, unsolicited_out)
+    
+    # Helper to ping the other end
+    async def ping(self) -> None:
+        await self.raw_query(b'')
+
+    async def send_device_command(self, dev: types.SerialNumber | bytes, component: int, action: int,
+                                   params: Iterable[bytes]) -> None:
+        if isinstance(dev, types.SerialNumber):
+            sn = dev.sn
+        else:
+            sn = dev
+        command = b'#DEVICE,%s,%d,%d,%s' % (sn, component, action, b','.join(params))
+        await self.raw_query(command)
 
     # Reads one single unsolicited message
     async def read_unsolicited(self) -> bytes:
