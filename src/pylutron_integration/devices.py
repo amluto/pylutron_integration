@@ -230,6 +230,17 @@ def decode_device_update(message: bytes, iidmap: types.IntegrationIDMap) -> Devi
         serial_number=sn, component=component, action=action, value=value
     )
 
+async def probe_device(conn: connection.LutronConnection, iidmap: types.IntegrationIDMap, dev_id: types.SerialNumber | bytes) -> list[DeviceUpdate]:
+    result: list[DeviceUpdate] = []
+    _, updates = await conn.probe_device(dev_id)
+
+    for update in updates:
+        decoded = decode_device_update(update, iidmap)
+        if decoded is not None:
+            result.append(decoded)
+
+    return result
+
 _IIDLINE_RE = re.compile(b'~INTEGRATIONID,([^,]+),(DEVICE|OUTPUT),([0-9A-Fa-fx]+)(?:,([0-9]+))?', re.S)
 
 async def enumerate_iids(conn: connection.LutronConnection) -> types.IntegrationIDMap:
