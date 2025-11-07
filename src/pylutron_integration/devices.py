@@ -159,7 +159,26 @@ Shade = DeviceClass(
     ]
 )
 
+Keypad = DeviceClass(
+    groups=[
+        # Buttons 1-7: most keypads have these, even if they claim to have fewer
+        # buttons.  They might be hiding under the cover plate.
+        ComponentGroup(name='BUTTON', desc='Button', array_spec=ArraySpec(count=7, base=1)),
+
+        # The top raise/lower buttons only sometimes exist.  The bottom raise/lower
+        # buttons are very common.  It's a bit unclear what happens if they are
+        # physically absent (e.g. on a "7-button" Architrave keypad, not all
+        # programming features are present because the bottom raise/lower buttons
+        # don't exist.)
+        ComponentGroup(name='BUTTON_TOP_LOWER', desc='Button Top Lower', numbers=(16,)),
+        ComponentGroup(name='BUTTON_TOP_RAISE', desc='Button Top Raise', numbers=(17,)),
+        ComponentGroup(name='BUTTON_BOTTOM_LOWER', desc='Button Top Lower', numbers=(18,)),
+        ComponentGroup(name='BUTTON_BOTTOM_RAISE', desc='Button Top Raise', numbers=(19,)),
+    ]
+)
+
 # TODO: This isn't great: a shade power supply is 'SHADES(3)' but is not a shade
+FAMILY_TO_CLASS[b'KEYPAD(1)'] = Keypad
 FAMILY_TO_CLASS[b'GRAFIK_EYE(2)'] = GrafikEyeQS
 FAMILY_TO_CLASS[b'SHADES(3)'] = Shade
 

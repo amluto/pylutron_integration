@@ -61,7 +61,25 @@ class DeviceAction(Enum):
     # It seems to have the value 0 most of the time but has other values when the shade
     # is moving.
     MOTOR_MYSTERY = 21
-    
+
+class OutputAction(Enum):
+    LIGHT_LEVEL = 1
+    START_RAISING = 2
+    START_LOWERING = 3
+    STOP_RAISING_LOWERING = 4
+    START_FLASHING = 5
+    PULSE_TIME = 6
+    TILT_LEVEL = 9
+    LIFT_TILT_LEVEL = 10
+    START_RAISING_TILT = 11
+    START_LOWERING_TILT = 14
+    STOP_RAISING_LOWERING_TILT = 13
+    START_RAISING_LIFT = 14
+    START_LOWERING_LIFT = 15
+    STOP_RAISING_LOWERING_LIFT = 16
+    DMX_COLOR_LEVEL = 17
+
+
 @dataclass
 class IntegrationIDMap:
     # Maps output integration ids to the device sn and output/zone number
