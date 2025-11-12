@@ -292,8 +292,9 @@ class LutronConnection:
             await self.__conn.w.drain()
 
             async with self.__cond:
-                await self.__wait_for_data(lambda: self.__current_query.reply is not None)
+                await self.__wait_for_data(lambda: self.__current_query is not None and self.__current_query.reply is not None)
 
+                assert self.__current_query is not None
                 assert self.__current_query.reply is not None
                 reply = self.__current_query.reply
                 self.__current_query = None
