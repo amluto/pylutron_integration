@@ -234,7 +234,7 @@ def decode_device_update(message: bytes, iidmap: types.IntegrationIDMap) -> Devi
     except ValueError:
         # Not a serial number, try integration ID
         if device_identifier in iidmap.device_ids:
-            sn = iidmap.device_ids[device_identifier].sn
+            sn = iidmap.device_ids[device_identifier]
         else:
             _LOGGER.debug("Unknown device identifier: %s", device_identifier)
             return None

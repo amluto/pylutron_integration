@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from . import connection, types, devices
 from .types import SerialNumber
 import re
@@ -109,9 +109,10 @@ class IntegrationIDRecord:
     style: bytes # either b'DEVICE' or b'OUTPUT'
     sn: SerialNumber
 
+@dataclass
 class LutronUniverse:
-    devices_by_sn: dict[SerialNumber, DeviceDetails]
-    iidmap: types.IntegrationIDMap
+    devices_by_sn: dict[SerialNumber, DeviceDetails] = field(default_factory = dict)
+    iidmap: types.IntegrationIDMap = field(default_factory = types.IntegrationIDMap)
 
     # NB: It's possible for devices_by_sn and iidmap to be out of sync
     # with each other if configuration changes between when we read

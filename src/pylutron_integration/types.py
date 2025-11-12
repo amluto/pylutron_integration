@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 import re
-from enum import Enum
+from enum import Enum, unique
 
 _SN_RE = re.compile(b'(?:0x)?([0-9A-Fa-f]{0,8})', re.S)
 
@@ -37,11 +37,12 @@ class SerialNumber:
         return self.sn.decode()
 
 # These are DEVICE actions.  OUTPUT actions are different.
+@unique
 class DeviceAction(Enum):
     ENABLE = 1
     DISABLE = 2
-    PRESS_CLOSE_UNOCC = 3
-    RELEASE_OPEN_OCC = 4
+    PRESS_CLOSE_UNOCC = 3 # Press button or close shades or room unoccupied
+    RELEASE_OPEN_OCC = 4 # Release button or open shades or room occupied
     HOLD = 5
     DOUBLE_TAP = 6
     CURRENT_SCENE = 7
@@ -62,6 +63,7 @@ class DeviceAction(Enum):
     # is moving.
     MOTOR_MYSTERY = 21
 
+@unique
 class OutputAction(Enum):
     LIGHT_LEVEL = 1
     START_RAISING = 2
@@ -72,7 +74,7 @@ class OutputAction(Enum):
     TILT_LEVEL = 9
     LIFT_TILT_LEVEL = 10
     START_RAISING_TILT = 11
-    START_LOWERING_TILT = 14
+    START_LOWERING_TILT = 12
     STOP_RAISING_LOWERING_TILT = 13
     START_RAISING_LIFT = 14
     START_LOWERING_LIFT = 15
