@@ -1,12 +1,8 @@
-[project]
-name = "pylutron-integration"
-version = "0.0.0"
-description = "Lutron Integration Protocol client"
-readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
-
-[dependency-groups]
-dev = [
-    "pytest>=8.4.2",
+[tool.uv.workspace]
+members = [
+    "packages/pylutron-integration",
+    "packages/pylutron-integration-cli",
 ]
+
+[tool.uv.sources]
+pylutron-integration = { workspace = true }
