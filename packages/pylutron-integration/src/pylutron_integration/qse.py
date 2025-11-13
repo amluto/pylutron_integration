@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from . import connection, types, devices
 from .types import SerialNumber
-import re
 
 # Notes:
 #

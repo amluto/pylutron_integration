@@ -1,6 +1,5 @@
 """Tests for the monitor CLI tool."""
 
-import pytest
 from pylutron_integration import devices, types, qse
 from pylutron_integration_cli.monitor import format_device_update
 

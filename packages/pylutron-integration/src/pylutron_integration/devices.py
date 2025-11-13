@@ -1,7 +1,6 @@
 from dataclasses import dataclass
-from enum import Enum
 import re
-from . import types, qse, connection
+from . import types, connection
 import logging
 
 _LOGGER = logging.getLogger(__name__)
