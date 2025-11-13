@@ -6,3 +6,8 @@ members = [
 
 [tool.uv.sources]
 pylutron-integration = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.4",
+]
