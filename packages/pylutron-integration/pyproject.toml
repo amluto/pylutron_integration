@@ -13,8 +13,3 @@ dependencies = []
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pylutron_integration"]
-
-[dependency-groups]
-dev = [
-    "pytest>=8.4.2",
-]
