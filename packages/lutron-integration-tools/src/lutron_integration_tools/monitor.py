@@ -9,7 +9,7 @@ import getpass
 import logging
 import sys
 
-from pylutron_integration import connection, devices, qse
+from lutron_integration import connection, devices, qse
 
 
 logging.basicConfig(level=logging.WARNING)

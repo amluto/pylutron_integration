@@ -1,12 +1,10 @@
-# pylutron-integration-cli
+# lutron-integration-tools
 
-Command-line tools for [pylutron-integration](https://github.com/amluto/pylutron_integration).
+Command-line tools for [lutron-integration](https://github.com/amluto/lutron-integration).
 
 ## Installation
 
-```bash
-pip install pylutron-integration-cli
-```
+There is generally no need to install this per se.  Use uv!
 
 ## Usage
 

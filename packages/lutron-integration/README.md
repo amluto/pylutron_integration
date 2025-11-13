@@ -1,11 +1,11 @@
 # What is this? #
 
-pylutron_integration is a a client library for the Lutron Integration Protocol.
+lutron_integration is a a client library for the Lutron Integration Protocol.
 This is a protocol used by a number of different Lutron products, documented here:
 
 https://assets.lutron.com/a/documents/040249.pdf
 
-pylutron_integration is intended to be able to support all dialects of the protocol,
+lutron_integration is intended to be able to support all dialects of the protocol,
 but it is currently primarily targetted at the "QS Standalone" dialect.  Other dialects
 are barely, if at all, implemented.
 
@@ -37,7 +37,7 @@ see [page 19][lip].  The QSE-CI-NWK-E does not appear to support DHCP at all,
 and Lutron recommends using static addresses even for other dialects.  Or you can
 use RS232.
 
-pylutron_integration presently has no dependencies at all outside the standard library,
+lutron_integration presently has no dependencies at all outside the standard library,
 and I would like to keep it that way unless there is a fairly compelling reason
 to add a dependency.
 
@@ -51,7 +51,7 @@ serial port.
 
 (Lots more to write here)
 
-pylutron_integration is fully async and very strongly respects the idea of
+lutron_integration is fully async and very strongly respects the idea of
 structured concurrency: it does not create tasks at all.  If you want the
 library do so something, you call it.  If you are not actively calling it,
 it does nothing!
